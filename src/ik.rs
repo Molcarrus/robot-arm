@@ -53,7 +53,7 @@ pub struct FabrikChain {
 impl FabrikChain {
     pub fn new(joints: Vec<Vec3>, motion_heuristics: MotionHueristics) -> Self {
         let mut lengths = Vec::new();
-        for i in i..joints.len() {
+        for i in 1..joints.len() {
             let length = joints[i].distance(joints[i-1]);
             lengths.push(length);
         }
