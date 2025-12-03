@@ -1,7 +1,10 @@
-use crate::ik::{FabrikChain, KinematicsMode, MotionHueristics};
+use crate::ik::{FabrikChain, KinematicsMode, MotionHueristics, PoseDiscrepancy};
 
 use bevy::prelude::*;
+use bevy_egui::{EguiContexts, egui::Window};
 use bevy_transform_gizmo::{GizmoUpdate, TransformGizmoEvent};
+use egui_plot::{Line, Plot, PlotPoints};
+use strum::IntoEnumIterator;
 
 mod ik;
 
@@ -49,7 +52,7 @@ fn main() {
 //     }
 // }
 
-#[derive(Component, Default, Debug, Clone)]
+#[derive(Component, Default, Debug, Clone, Copy)]
 struct ControlBall {
     index: usize,
 }
@@ -67,16 +70,16 @@ struct Segment {
 #[derive(Component, Default, Debug, Clone)]
 struct FantasyComponent;
 
-#[derive(Event, Default, Message)]
+#[derive(Default, Message)]
 struct SyncTransform;
 
-#[derive(Event, Default, Message)]
+#[derive(Default, Message)]
 struct RecomputeLimb;
 
-#[derive(Event, Default)]
+#[derive(Default, Message)]
 struct MoveLimb;
 
-#[derive(Event, Message)]
+#[derive(Message)]
 struct GizmoUpdater(GizmoUpdate);
 
 #[derive(States, Default, Debug, Hash, PartialEq, Eq, Clone, strum::EnumIter, strum::Display)]
@@ -90,7 +93,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut ev_sync_transforms: EventWriter<SyncTransform>
+    mut ev_sync_transforms: MessageWriter<SyncTransform>
 ) {
     let joints = vec![
         Vec3::new(0.0, 0.0, 0.0),
@@ -150,7 +153,7 @@ fn sync_ball_transform(
     }
 }
 
-fn handle_limb_switch(mut ev_sync_transforms: EventWriter<SyncTransform>) {
+fn handle_limb_switch(mut ev_sync_transforms: MessageWriter<SyncTransform>) {
     ev_sync_transforms.write_default();
 }
 
@@ -184,8 +187,8 @@ fn sync_segment_transform(
 fn move_limb(
     query_ctrl_ball: Query<(&ControlBall, &Transform)>,
     mut query_chain: Query<&mut LimbData>,
-    mut ev_gizmo: EventReader<GizmoUpdater>,
-    mut ev_recompute: EventWriter<RecomputeLimb>,
+    mut ev_gizmo: MessageReader<GizmoUpdater>,
+    mut ev_recompute: MessageWriter<RecomputeLimb>,
     limb_state: Res<State<LimbState>>
 ) {
     let mut excluded = Vec::new();
@@ -196,11 +199,118 @@ fn move_limb(
     limb.targets.clear();
     
     for &event in ev_gizmo.read() {
+        let entity = event.0.entity().clone();
         let (ball, transform) = query_ctrl_ball
-            .get(event.0.entity())
+            .get(entity)
             .expect("Something is moving but it's not a ball!");
         excluded.push(ball.index);
         limb.targets
             .push((ball.index, transform.translation.clone()));
     }
+}
+
+fn recompute_limb(
+    mut query_chain: Query<&mut LimbData>,
+    mut query_velocity_display: Query<&mut VelocityDisplay>,
+    mut ev_sync_transform: MessageWriter<SyncTransform>,
+    limb_state: Res<State<LimbState>>
+) {
+    let mut chain = query_chain.single_mut().unwrap();
+    let limb = chain.get_mut(limb_state.get());
+    
+    limb.solve(10, PoseDiscrepancy::default(), &mut KinematicsMode::InverseKinematics);
+    
+    if !limb.angular_velocities.is_empty() {
+        query_velocity_display
+            .single_mut()
+            .unwrap()
+            .0
+            .push(limb.angular_velocities.clone());
+    }
+    
+    ev_sync_transform.write_default();
+}
+
+fn diplay_ui(
+    mut context: EguiContexts,
+    mut query: Query<&mut VelocityDisplay>,
+    mut query_chain: Query<&mut LimbData>,
+    mut ui_state: ResMut<UiState>,
+    mut ev_sync_transforms: MessageWriter<SyncTransform>,
+    limb_state_ro: ResMut<State<LimbState>>,
+    mut limb_state: ResMut<NextState<LimbState>>
+) {
+    let mut chain = query_chain.single_mut().unwrap();
+    
+    Window::new("Limb Control").show(context.ctx_mut().unwrap(), |ui| {
+        let mut velocity_display = query.single_mut().unwrap();
+        
+        if ui
+            .button("Reset Graph")
+            .clicked() 
+        {
+            velocity_display.0.clear();
+        }
+        if ui
+            .button("Reset All")
+            .clicked() 
+        {
+            velocity_display.0.clear();
+            chain.0.reset();
+            ev_sync_transforms.write_default();
+        }
+        if ui
+            .checkbox(&mut ui_state.lock_ground, "Lock Ground")
+            .changed()
+        {
+            chain.0.lock_ground = ui_state.lock_ground;
+            chain.0.limb.as_mut().unwrap().lock_ground = ui_state.lock_ground;
+        }
+        
+        for possible_mode in LimbState::iter() {
+            let name = possible_mode.to_string();
+            if ui
+                .radio_value(&mut limb_state_ro.clone(), possible_mode.clone(), name)
+                .clicked()
+            {
+                limb_state.set(possible_mode);
+            }
+        }
+        
+        ui.separator();
+        
+        let mut velocities = Vec::new();
+        if let Some(first_len) = velocity_display.0.first().map(|x| x.len()) {
+            for _ in 0..first_len {
+                velocities.push(Vec::new());
+            }
+            for x in 0..velocity_display.0.len() {
+                for y in 0..velocity_display.0[x].len() {
+                    let new_point = [x as f64, velocity_display.0[x][y] as f64];
+                    match velocities.get_mut(y) {
+                        Some(y_ptr) => {
+                            y_ptr.push(new_point);
+                        }
+                        None => {
+                            velocities.push(vec![new_point]);
+                        }
+                    }
+                }
+            }
+            
+            let lines = velocities
+                .into_iter()
+                .map(|x| Line::new("Plot #1", PlotPoints::new(x)));
+            
+            Plot::new("velocity")
+                .view_aspect(2.0)
+                .show(ui, |plot_ui| {
+                    for line in lines {
+                        plot_ui.line(line);
+                    }
+                });
+        } else {
+            ui.label("NO DATA");
+        }
+    });
 }
