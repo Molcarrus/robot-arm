@@ -2,7 +2,7 @@ use crate::ik::{FabrikChain, KinematicsMode, MotionHueristics, PoseDiscrepancy};
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui::Window};
-use bevy_transform_gizmo::{GizmoUpdate, TransformGizmoEvent};
+use bevy_transform_gizmo::TransformGizmoInteraction;
 use egui_plot::{Line, Plot, PlotPoints};
 use strum::IntoEnumIterator;
 
@@ -79,14 +79,42 @@ struct RecomputeLimb;
 #[derive(Default, Message)]
 struct MoveLimb;
 
-#[derive(Message)]
-struct GizmoUpdater(GizmoUpdate);
-
 #[derive(States, Default, Debug, Hash, PartialEq, Eq, Clone, strum::EnumIter, strum::Display)]
 enum LimbState {
     #[default]
     RealLimb,
     FantasyLimb,
+}
+
+#[derive(Debug, Clone, Message)]
+pub enum GizmoUpdate {
+    Hover {
+        entity: Entity,
+    },
+    Grab {
+        entity: Entity,
+    },
+    Drag {
+        entity: Entity,
+        interaction: Option<TransformGizmoInteraction>,
+    },
+    Release {
+        entity: Entity,
+    },
+}
+
+impl GizmoUpdate {
+    pub fn entity(&self) -> &Entity {
+        match self {
+            GizmoUpdate::Hover { entity } => &entity,
+            GizmoUpdate::Grab { entity } => &entity,
+            GizmoUpdate::Drag {
+                entity,
+                interaction: _,
+            } => &entity,
+            GizmoUpdate::Release { entity } => &entity,
+        }
+    }
 }
 
 fn setup(
@@ -187,7 +215,7 @@ fn sync_segment_transform(
 fn move_limb(
     query_ctrl_ball: Query<(&ControlBall, &Transform)>,
     mut query_chain: Query<&mut LimbData>,
-    mut ev_gizmo: MessageReader<GizmoUpdater>,
+    mut ev_gizmo: MessageReader<GizmoUpdate>,
     mut ev_recompute: MessageWriter<RecomputeLimb>,
     limb_state: Res<State<LimbState>>
 ) {
@@ -198,8 +226,8 @@ fn move_limb(
     let limb = chain.get_mut(limb_state.get());
     limb.targets.clear();
     
-    for &event in ev_gizmo.read() {
-        let entity = event.0.entity().clone();
+    for event in ev_gizmo.read() {
+        let entity = event.entity().clone();
         let (ball, transform) = query_ctrl_ball
             .get(entity)
             .expect("Something is moving but it's not a ball!");
