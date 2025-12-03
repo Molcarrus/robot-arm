@@ -1,8 +1,8 @@
 use crate::ik::{FabrikChain, KinematicsMode, MotionHueristics, PoseDiscrepancy};
 
-use bevy::prelude::*;
+use bevy::{light::PointLightShadowMap, prelude::*};
 use bevy_egui::{EguiContexts, egui::Window};
-use bevy_transform_gizmo::TransformGizmoInteraction;
+use bevy_transform_gizmo::{TransformGizmoInteraction, TransformGizmoPlugin};
 use egui_plot::{Line, Plot, PlotPoints};
 use strum::IntoEnumIterator;
 
@@ -43,7 +43,60 @@ impl LimbData {
 pub struct VelocityDisplay(Vec<Vec<f32>>);
 
 fn main() {
-    println!("Hello, world!");
+    let window = bevy::prelude::Window {
+        title: "Robot Arm".to_string(),
+        ..default()
+    };
+    
+    App::new()
+        // .add_sub_state::<LimbState>()
+        .add_plugins(
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(window),
+                ..default()
+            })
+        )
+        .add_plugins(DefaultPickingPlugins)
+        .add_plugins(bevy_egui::EguiPlugin::default())
+        // .add_plugins(TransformGizmoPlugin::default())
+        .add_message::<SyncTransform>()
+        .add_message::<RecomputeLimb>()
+        .add_message::<MoveLimb>()
+        // .insert_resource(Msaa::Sample4)
+        .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(PointLightShadowMap { size: 8192 })
+        .init_resource::<UiState>()
+        .add_systems(Startup, setup)
+        .add_systems(Update, display_ui)
+        .add_systems(
+            Update, 
+            move_limb
+                .run_if((on_message::<GizmoUpdate>).or(on_message::<MoveLimb>))
+                .before(recompute_limb)
+        )
+        .add_systems(
+            Update, 
+            recompute_limb 
+                .run_if(on_message::<GizmoUpdate>.or(on_message::<RecomputeLimb>))
+                .before(sync_ctrl_ball_transform)
+        )
+        .add_systems(
+            Update, 
+            handle_limb_switch.run_if(resource_changed::<State<LimbState>>)
+        )
+        .add_systems(
+            Update, 
+            sync_ball_transform.run_if(on_message::<SyncTransform>)
+        )
+        .add_systems(
+            Update, 
+            sync_ctrl_ball_transform.run_if(on_message::<SyncTransform>)
+        )
+        .add_systems(
+            Update, 
+            sync_segment_transform.run_if(on_message::<SyncTransform>)
+        )
+        .run();
 }
 
 // fn forwared_kinematics(kinematics_mode: Res<KinematicsMode>) {
@@ -163,6 +216,58 @@ fn setup(
         base_color: Color::linear_rgba(0.7, 0.7, 1.0, 0.2),
         ..default()
     });
+    
+    for i in 0..limb.joints.len() {
+        let transform = Transform::from_translation(limb.joints[i]);
+        commands.spawn((
+            Mesh3d(ball_mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            transform,
+            InnerBall { index: i }
+        ));
+        
+        commands.spawn((
+            Mesh3d(control_ball_mesh.clone()),
+            MeshMaterial3d(transculent_material.clone()),
+            Transform::from_translation(limb.joints[i]),
+            ControlBall { index: i }
+        ));
+        
+        commands.spawn((
+            Mesh3d(fantasy_ball_mesh.clone()),
+            MeshMaterial3d(fantasy_material.clone()),
+            transform,
+            InnerBall { index: i },
+            FantasyComponent
+        ));
+    }
+    
+    for i in 0..limb.lengths.len() {
+        let mesh = meshes.add(Mesh::from(Cylinder::new(0.15, limb.lengths[i])));
+        let fantasy_mesh = meshes.add(Mesh::from(Cylinder::new(0.15 * 0.999, limb.lengths[i])));
+        commands.spawn((
+            Mesh3d(fantasy_mesh.clone()),
+            MeshMaterial3d(fantasy_material.clone()),
+            Transform::from(limb.segment_transforms[i]),
+            Segment { index: i },
+            FantasyComponent
+        ));
+        commands.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from(limb.segment_transforms[i]),
+            Segment { index: i }
+        ));
+    }
+    limb.finalize();
+    commands.spawn(LimbData(limb));
+    
+    ev_sync_transforms.write_default();
+    
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 6.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 }
 
 fn sync_ball_transform(
@@ -235,6 +340,8 @@ fn move_limb(
         limb.targets
             .push((ball.index, transform.translation.clone()));
     }
+    
+    ev_recompute.write_default();
 }
 
 fn recompute_limb(
@@ -242,8 +349,7 @@ fn recompute_limb(
     mut query_velocity_display: Query<&mut VelocityDisplay>,
     mut ev_sync_transform: MessageWriter<SyncTransform>,
     limb_state: Res<State<LimbState>>
-) {
-    let mut chain = query_chain.single_mut().unwrap();
+) {    let mut chain = query_chain.single_mut().unwrap();
     let limb = chain.get_mut(limb_state.get());
     
     limb.solve(10, PoseDiscrepancy::default(), &mut KinematicsMode::InverseKinematics);
@@ -259,7 +365,7 @@ fn recompute_limb(
     ev_sync_transform.write_default();
 }
 
-fn diplay_ui(
+fn display_ui(
     mut context: EguiContexts,
     mut query: Query<&mut VelocityDisplay>,
     mut query_chain: Query<&mut LimbData>,
