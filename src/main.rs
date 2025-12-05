@@ -1,7 +1,7 @@
 use crate::ik::{FabrikChain, KinematicsMode, MotionHueristics, PoseDiscrepancy};
 
 use bevy::{light::PointLightShadowMap, prelude::*};
-use bevy_egui::{EguiContexts, egui::Window};
+use bevy_egui::{EguiContexts, EguiPostUpdateSet, EguiPreUpdateSet, egui::Window};
 use bevy_transform_gizmo::{TransformGizmoInteraction, TransformGizmoPlugin};
 use egui_plot::{Line, Plot, PlotPoints};
 use strum::IntoEnumIterator;
@@ -52,28 +52,36 @@ fn main() {
         // .add_sub_state::<LimbState>()
         .add_plugins(
             DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(window),
+                primary_window: Some(window),  
                 ..default()
             })
         )
-        .add_plugins(DefaultPickingPlugins)
+        // .add_plugins(DefaultPickingPlugins)
         .add_plugins(bevy_egui::EguiPlugin::default())
         // .add_plugins(TransformGizmoPlugin::default())
         .add_message::<SyncTransform>()
         .add_message::<RecomputeLimb>()
         .add_message::<MoveLimb>()
+        .add_message::<GizmoUpdate>()
         // .insert_resource(Msaa::Sample4)
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(PointLightShadowMap { size: 8192 })
+        .init_state::<LimbState>()
         .init_resource::<UiState>()
+        // .init_resource::<State<LimbState>>()
         .add_systems(Startup, setup)
-        .add_systems(Update, display_ui)
+        .add_systems(
+            Update, 
+            display_ui
+                .after(EguiPreUpdateSet::InitContexts)
+                .before(EguiPostUpdateSet::ProcessOutput)
+        )
         .add_systems(
             Update, 
             move_limb
                 .run_if((on_message::<GizmoUpdate>).or(on_message::<MoveLimb>))
                 .before(recompute_limb)
-        )
+        )          
         .add_systems(
             Update, 
             recompute_limb 
@@ -372,8 +380,14 @@ fn display_ui(
     mut ui_state: ResMut<UiState>,
     mut ev_sync_transforms: MessageWriter<SyncTransform>,
     limb_state_ro: ResMut<State<LimbState>>,
-    mut limb_state: ResMut<NextState<LimbState>>
+    mut limb_state: ResMut<NextState<LimbState>>,
+    mut frame_count: Local<u32> 
 ) {
+    *frame_count += 1;
+    if *frame_count <= 3 {
+        return;
+    }
+    
     let mut chain = query_chain.single_mut().unwrap();
     
     Window::new("Limb Control").show(context.ctx_mut().unwrap(), |ui| {
